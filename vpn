@@ -1,0 +1,253 @@
+#!/bin/bash
+
+# 🎛️ Konfiguration
+CONFIG_FILE="$HOME/.vpnrotate.conf"
+if [[ -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
+fi
+
+CONFIG_DIR="${VPNROTATE_CONFIG_DIR:-$HOME/Mullvad/mullvad_config_linux}"
+DEFAULT_COUNTRY="de"
+DEFAULT_CONFIG="$CONFIG_DIR/mullvad_${DEFAULT_COUNTRY}_all.conf"
+
+# 🦘 Hilfe
+print_help() {
+    echo '🔧 Mullvad VPN CLI
+
+Einfaches Terminal-Werkzeug zur Steuerung von Mullvad OpenVPN-Verbindungen per CLI.
+Dieses Tool wurde entwickelt, um mühsames Konfig-Dateien auswählen, starten und stoppen
+von VPNs über komplexe OpenVPN-Befehle zu vermeiden. Es bietet einen bequemen Ein-Befehl-Zugang
+zu Rotation, Status, Start, Stopp und Patch-Vorgängen.
+'
+    echo "Verwendung:"
+    echo "  vpn on                  # VPN starten"
+    echo "  vpn off                 # VPN trennen"
+    echo "  vpn status              # Status anzeigen"
+    echo "  vpn rotate [-de|-us]    # Server (optional Land) rotieren"
+    echo "  vpn rotate -cs          # Verfügbare Länder zeigen"
+    echo "  vpn rotate -CF <pfad>   # Standardkonfig-Ordner setzen"
+    echo "  vpn patch               # Mullvad .conf-Dateien patchen und Pfad merken"
+    echo "  vpn help                # Diese Hilfe anzeigen"
+    echo
+    echo "🧠 Hinweis: Führe beim ersten Start 'vpn patch' aus, damit deine .conf-Dateien korrekt vorbereitet und der Pfad dauerhaft gespeichert wird."
+}
+
+# 🔌 VPN trennen
+vpn_off() {
+    echo "🔌 VPN wird getrennt..."
+
+    PIDS=$(pgrep -f "sudo openvpn --config")
+    if [ -z "$PIDS" ]; then
+        echo "⚠️  Kein laufender OpenVPN-Prozess gefunden."
+    else
+        for PID in $PIDS; do
+            echo "💼 Beende OpenVPN-Prozess $PID..."
+            sudo kill "$PID"
+        done
+    fi
+
+    sleep 2
+    if ip a | grep -q tun0; then
+        sudo ip link delete tun0
+        echo "✅ VPN getrennt (tun0 entfernt)"
+    else
+        echo "ℹ️  Kein VPN-Interface (tun0) mehr vorhanden"
+    fi
+}
+
+# 🚀 VPN starten
+vpn_on() {
+    echo "🔄 VPN-Verbindung wird aufgebaut..."
+    
+    sudo openvpn --config "$DEFAULT_CONFIG" > /tmp/vpn.log 2>&1 &
+    VPN_PID=$!
+    echo "📡 OpenVPN-Prozess gestartet (PID: $VPN_PID)"
+
+    echo "⏳ Warte auf VPN-Interface (tun0)..."
+    for i in {1..10}; do
+        sleep 1
+        if ip a | grep -q tun0; then
+            break
+        fi
+    done
+
+    if ip a | grep -q tun0; then
+        echo "⚙️  Setze DNS..."
+        sudo resolvectl dns tun0 10.16.0.1 &>/dev/null
+        echo "🧪 Prüfe Verbindung..."
+        vpn_status
+    else
+        echo "❌ VPN konnte nicht gestartet werden. Prüfe Log unter: /tmp/vpn.log"
+        tail -n 10 /tmp/vpn.log
+    fi
+}
+
+# 📱 VPN-Status
+vpn_status() {
+    echo "🔍 Prüfe VPN-Status..."
+    IFACE="tun0"
+    DNS=$(resolvectl dns 2>/dev/null | grep "$IFACE")
+    IPDATA=$(curl -s https://am.i.mullvad.net/json)
+
+    if ip a | grep -q "$IFACE"; then
+        echo "✅ Interface $IFACE ist aktiv"
+    else
+        echo "❌ Kein VPN-Interface aktiv"
+    fi
+
+    if [[ "$IPDATA" == *'"mullvad_exit_ip":true'* ]]; then
+        if command -v jq >/dev/null; then
+            IP=$(echo "$IPDATA" | jq -r .ip)
+            HOST=$(echo "$IPDATA" | jq -r .mullvad_exit_ip_hostname)
+            CITY=$(echo "$IPDATA" | jq -r .city)
+            COUNTRY=$(echo "$IPDATA" | jq -r .country)
+            echo "🌍 Exit-IP: $IP ($HOST, $CITY, $COUNTRY)"
+        else
+            IP=$(echo "$IPDATA" | grep '"ip"' | cut -d'"' -f4)
+            echo "🌍 Exit-IP: $IP (📦 für mehr Infos: sudo apt install jq)"
+        fi
+    else
+        echo "⚠️  Kein aktiver Mullvad-Tunnel erkannt"
+    fi
+
+    if [ -n "$DNS" ]; then
+        echo "🗽 DNS über $IFACE: $DNS"
+    else
+        echo "⚠️  DNS läuft nicht über $IFACE"
+    fi
+}
+
+# 🌍 VPN-Rotation
+vpn_rotate() {
+    SHOW_COUNTRIES=false
+    SET_CONFIG_DIR=false
+    COUNTRY=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -cs|--country_show) SHOW_COUNTRIES=true; shift ;;
+            -CF) echo "VPNROTATE_CONFIG_DIR=\"$2\"" > "$CONFIG_FILE"; echo "✅ Neuer Standardordner gespeichert: $2"; exit 0 ;;
+            -*) COUNTRY="${1:1}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if $SHOW_COUNTRIES; then
+        echo "🌐 Verfügbare Länder in $CONFIG_DIR:"
+        find "$CONFIG_DIR" -type f -name "mullvad_*.conf" |
+            sed 's|.*/||' | awk -F'_' '{print $2}' | sort -u |
+            while read code; do printf "  - %s\n" "$code"; done
+        exit 0
+    fi
+
+    echo "🔄 VPN-Rotation läuft..."
+    vpn_off
+
+    echo "⏳ Warte auf Deaktivierung von tun0..."
+    for i in {1..10}; do
+        sleep 1
+        ! ip a | grep -q tun0 && break
+    done
+
+    if [[ -z "$COUNTRY" ]]; then
+        CONFIG="$DEFAULT_CONFIG"
+        echo "🎲 Verwende Standard-Konfiguration: $CONFIG"
+    else
+        echo "🌟 Suche Konfigurationen für Land: $COUNTRY in $CONFIG_DIR"
+        MATCHES=($(find "$CONFIG_DIR" -type f -name "mullvad_${COUNTRY}_*.conf"))
+        if [[ ${#MATCHES[@]} -eq 0 ]]; then
+            echo "❌ Keine passende Konfiguration für '$COUNTRY' gefunden."
+            exit 1
+        fi
+        RANDOM_INDEX=$((RANDOM % ${#MATCHES[@]}))
+        CONFIG="${MATCHES[$RANDOM_INDEX]}"
+        echo "🌟 Gewählt: $CONFIG"
+    fi
+
+    echo "🚀 Starte Verbindung mit: $CONFIG"
+    sudo openvpn --config "$CONFIG" > /tmp/vpn.log 2>&1 &
+    VPN_PID=$!
+    echo "📡 OpenVPN-Prozess gestartet (PID: $VPN_PID)"
+
+    echo "⏳ Warte auf VPN-Interface (tun0)..."
+    for i in {1..10}; do
+        sleep 1
+        if ip a | grep -q tun0; then
+            break
+        fi
+    done
+
+    if ip a | grep -q tun0; then
+        echo "⚙️  Setze DNS..."
+            sudo resolvectl dns tun0 10.16.0.1 &>/dev/null
+            echo "✅ Verbindung steht. Du kannst jetzt 'vpn status' verwenden."
+
+    else
+        echo "❌ VPN konnte nicht gestartet werden. Prüfe Log unter: /tmp/vpn.log"
+        tail -n 10 /tmp/vpn.log
+    fi
+}
+
+# 🩺 Configs patchen
+vpn_patch() {
+    echo "📁 Wo liegen deine Mullvad .conf-Dateien?"
+    read -r DIR
+    echo "🔧 Patch-Vorgang für $(find "$DIR" -name '*.conf' | wc -l) .conf-Dateien in $DIR..."
+
+    for f in "$DIR"/*.conf; do
+        echo "🛠️  Bearbeite: $f"
+        sed -i '/^up /d;/^down /d' "$f"
+        sed -i '/^script-security/d' "$f"
+        sed -i '/^redirect-gateway/d' "$f"
+        sed -i '/^tun-mtu/d;/^mssfix/d' "$f"
+
+        echo -e "redirect-gateway def1\nscript-security 2\ntun-mtu 1400\nmssfix 1360" >> "$f"
+        echo "✅ Gepatcht: $(basename "$f")"
+    done
+
+    echo "📂 Gespeichert als Standardpfad in: $CONFIG_FILE"
+    echo "VPNROTATE_CONFIG_DIR=\"$DIR\"" > "$CONFIG_FILE"
+    echo "🎉 VPN-Konfigurationen sind bereit zur Nutzung!"
+}
+
+# 🧠 Dispatcher
+case "$1" in
+    on) vpn_on ;;
+    off) vpn_off ;;
+    status) vpn_status ;;
+    rotate) shift; vpn_rotate "$@" ;;
+    patch) vpn_patch ;;
+    help)
+        if [[ "$2" == "-v" || "$2" == "--verbose" ]]; then
+            echo
+            echo "🔧 Mullvad VPN CLI Toolkit"
+            echo
+            echo "Dieses Tool wurde entwickelt, um das Arbeiten mit Mullvad OpenVPN-Verbindungen"
+            echo "unter Linux deutlich komfortabler zu gestalten. Es ersetzt manuelle Aufrufe von"
+            echo '\`sudo openvpn --config ...\` durch einfache Kommandos wie \`vpn on\`, \`vpn rotate -de\` etc.'
+            echo
+            echo "🌟 Ziel: Mullvad + OpenVPN CLI-freundlich, scripting-tauglich, systemweit."
+            echo
+            echo "⚠️  Kompatibilität:"
+            echo "- getestet auf Ubuntu 24.04 LTS"
+            echo "- benötigt: systemd, resolvectl, bash, gnome-terminal, openvpn, curl, jq (optional)"
+            echo "- andere Distributionen benötigen ggf. Anpassung"
+            echo
+            echo "🛠️ Ersteinrichtung:"
+            echo "  1. sudo mv vpn /usr/local/bin/vpn"
+            echo "  2. sudo chmod +x /usr/local/bin/vpn"
+            echo "  3. vpn patch   # einmalig ausführen!"
+            echo
+            echo "Danach stehen dir diese Befehle zur Verfügung:"
+            echo "  vpn on          ➔ VPN starten"
+            echo "  vpn off         ➔ VPN trennen"
+            echo "  vpn status      ➔ Status anzeigen"
+            echo "  vpn rotate -de  ➔ Zufälliger deutscher Server"
+            echo "  vpn patch       ➔ .conf-Dateien patchen"
+            echo "  vpn help        ➔ Kompakte Hilfe"
+            echo "  vpn help -v     ➔ Erweiterte Hilfe"
+        else
+            print_help
+        fi
+        ;;
+    *) echo "❌ Unbekannter Befehl: $1"; print_help ;;
+esac

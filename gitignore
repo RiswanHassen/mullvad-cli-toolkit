@@ -1,0 +1,32 @@
+# Logs
+*.log
+/tmp/
+vpn.log
+
+# Editor-Dateien
+*~
+*.swp
+*.swo
+.DS_Store
+
+# Systempfad-Konfigurationen
+.vpnrotate.conf
+
+# Benutzerdefinierte Konfigurationen
+/home/*/Mullvad/*
+!*.conf
+
+# VSCode & IDE
+.vscode/
+.idea/
+
+# Backup-Dateien
+*.bak
+*.old
+
+# Zip-Archive
+*.zip
+
+# Build-/Distributionsverzeichnisse
+dist/
+build/
