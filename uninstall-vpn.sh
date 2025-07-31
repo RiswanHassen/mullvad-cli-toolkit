@@ -40,5 +40,11 @@ fi
 #    fi
 #fi
 
+# 6. Persistente Einstellungen löschen
+if [[ -d ~/.vpncli ]]; then
+    echo "🗑 Entferne ~/.vpncli"
+    rm -rf ~/.vpncli
+fi
+
 
 echo "✅ VPN CLI Toolkit wurde entfernt."
