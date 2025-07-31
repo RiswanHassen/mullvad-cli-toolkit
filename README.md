@@ -1,3 +1,14 @@
+## 🚀 Schnellstart
+
+```bash
+curl -sL https://raw.githubusercontent.com/RiswanHassen/mullvad-cli-toolkit/main/auto-install.sh | bash
+```
+
+> ⚠️ Dieses Kommando lädt das Toolkit herunter, installiert es systemweit und führt automatisch `vpn patch` aus.  
+> 🛡️ Empfohlen für fortgeschrittene Linux-User mit `bash`, `systemd` und `OpenVPN`.
+
+---
+
 # 🛡️ Mullvad CLI Toolkit – Projektbeschreibung & Entwicklungsverlauf (Stand: Juli 2025)
 
 ## 🪪 Kurzbeschreibung
