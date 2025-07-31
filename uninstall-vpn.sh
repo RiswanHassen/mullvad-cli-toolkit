@@ -40,4 +40,5 @@ if [[ "$confirm" =~ ^[Yy]$ ]]; then
     fi
 fi
 
+
 echo "✅ VPN CLI Toolkit wurde entfernt."
