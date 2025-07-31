@@ -41,7 +41,7 @@ fi
 #fi
 
 # 6. Persistente Einstellungen löschen
-VPNDIR="$HOME/.vpncli.state"
+VPNDIR="$HOME/.vpncli"
 echo "🔍 Prüfe, ob $VPNDIR existiert..."
 if [[ -d "$VPNDIR" ]]; then
     echo "🗑 Entferne $VPNDIR"
