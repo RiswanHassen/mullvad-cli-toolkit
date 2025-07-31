@@ -1,0 +1,325 @@
+#!/bin/bash
+
+# 🎛️ Konfiguration
+CONFIG_FILE="$HOME/.vpnrotate.conf"
+STATE_FILE="$HOME/.vpncli.state"
+if [[ -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
+fi
+
+# 🧠 Statuswerte aus persistentem Status laden
+if [[ -f "$STATE_FILE" ]]; then
+    source "$STATE_FILE"
+fi
+
+CONFIG_DIR="${VPNROTATE_CONFIG_DIR:-$HOME/Mullvad/mullvad_config_linux}"
+DEFAULT_COUNTRY="de"
+DEFAULT_CONFIG="$CONFIG_DIR/mullvad_${DEFAULT_COUNTRY}_all.conf"
+
+RANDOM_ROTATION="${RANDOM_ROTATION:-false}"
+AUTO_ROTATE_INTERVAL="${AUTO_ROTATE_INTERVAL:-0}"
+AUTO_START="${AUTO_START:-false}"
+
+# 🦘 Hilfe
+print_help() {
+    cat <<EOF
+
+🔧 Mullvad CLI Toolkit – Hilfe
+
+vpn patch               # Optimiert alle .conf-Dateien (MTU etc.)
+                        --> UNBEDINGT VOR DER ERSTEN VERWENDUNG EINRICHTEN, SONST FUNKTIONIERT DAS TOOL NICHT!
+
+vpn on                  # VPN starten
+vpn off                 # VPN trennen
+vpn status              # Zeigt Verbindungsstatus, Exit-IP, DNS & Konfigurationen
+vpn rotate              # VPN-Verbindung neu aufbauen (gleiche oder neue Config)
+    -cs                 # Zeigt alle verfügbaren Länder
+    -<land>             # Verwendet zufällige Config dieses Landes (z. B. -se)
+vpn random              # Zufallsrotation ein-/ausschalten
+vpn autorotate <min>    # Alle X Minuten automatisch neu verbinden
+vpn autostart           # Autostart ein-/ausschalten (bei Login oder systemweit mit sudo)
+vpn uninstall           # Entfernt das Toolkit inkl. Autostart & Configs
+vpn help                # Diese Hilfe anzeigen
+
+EOF
+}
+
+vpn_random_toggle() {
+    if [[ "$RANDOM_ROTATION" == true ]]; then
+        RANDOM_ROTATION=false
+    else
+        RANDOM_ROTATION=true
+    fi
+    echo "RANDOM_ROTATION=$RANDOM_ROTATION" > "$STATE_FILE"
+    echo "AUTO_ROTATE_INTERVAL=$AUTO_ROTATE_INTERVAL" >> "$STATE_FILE"
+    echo "AUTO_START=$AUTO_START" >> "$STATE_FILE"
+    echo "🎲 Zufallsrotation: $( [[ "$RANDOM_ROTATION" == true ]] && echo "an" || echo "aus" )"
+}
+
+# 🛠 Autostart toggeln (User oder systemweit)
+vpn_autostart_toggle() {
+    if [[ $EUID -eq 0 ]]; then
+        SERVICE_PATH="/etc/systemd/system/vpncli-autostart.service"
+        if [[ -f "$SERVICE_PATH" ]]; then
+            systemctl disable vpncli-autostart.service
+            rm "$SERVICE_PATH"
+            echo "🛑 Systemweiter Autostart wurde deaktiviert."
+        else
+            cat <<EOF > "$SERVICE_PATH"
+[Unit]
+Description=Mullvad VPN Autostart (System)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpn on
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reexec
+            systemctl enable vpncli-autostart.service
+            echo "✅ Systemweiter Autostart wurde aktiviert."
+        fi
+    else
+        DESKTOP_FILE="$HOME/.config/autostart/vpncli.desktop"
+        mkdir -p "$HOME/.config/autostart"
+        if [[ -f "$DESKTOP_FILE" ]]; then
+            rm "$DESKTOP_FILE"
+            echo "🛑 Autostart beim Benutzer-Login wurde deaktiviert."
+        else
+            cat <<EOF > "$DESKTOP_FILE"
+[Desktop Entry]
+Type=Application
+Exec=gnome-terminal -- bash -c 'vpn on; vpn status; exec bash'
+Hidden=false
+X-GNOME-Autostart-enabled=true
+Name=VPN CLI Autostart
+EOF
+            echo "✅ Autostart beim Benutzer-Login wurde aktiviert."
+        fi
+    fi
+}
+
+# 🔁 Auto-Rotation im Hintergrund
+start_auto_rotate() {
+    echo "🔁 Auto-Rotation aktiviert: alle $AUTO_ROTATE_INTERVAL Minuten"
+    echo "AUTO_ROTATE_INTERVAL=$AUTO_ROTATE_INTERVAL" > "$STATE_FILE"
+    echo "AUTO_START=$AUTO_START" >> "$STATE_FILE"
+    echo "RANDOM_ROTATION=$RANDOM_ROTATION" >> "$STATE_FILE"
+    while true; do
+        for ((i=AUTO_ROTATE_INTERVAL * 60; i>0; i--)); do
+            echo -ne "⏳ Nächste Rotation in $i Sekunden (aktuelle IP: $(curl -s https://am.i.mullvad.net/json | jq -r .ip 2>/dev/null))\r"
+            sleep 1
+        done
+        echo
+        echo "🔄 Automatische Rotation jetzt..."
+        vpn_rotate
+    done
+}
+
+# 🔌 VPN trennen
+vpn_off() {
+    echo "🔌 VPN wird getrennt..."
+
+    PIDS=$(pgrep -f "openvpn --config")
+    if [ -z "$PIDS" ]; then
+        echo "⚠️  Kein laufender OpenVPN-Prozess gefunden."
+    else
+        for PID in $PIDS; do
+            echo "💼 Beende OpenVPN-Prozess $PID..."
+            sudo kill "$PID"
+        done
+    fi
+
+    sleep 2
+    if ip a | grep -q tun0; then
+        sudo ip link delete tun0
+        echo "✅ VPN getrennt (tun0 entfernt)"
+    else
+        echo "ℹ️  Kein VPN-Interface (tun0) mehr vorhanden"
+    fi
+}
+
+# 🚀 VPN starten
+vpn_on() {
+    echo "🔄 VPN-Verbindung wird aufgebaut..."
+    sudo openvpn --config "$DEFAULT_CONFIG" > /tmp/vpn.log 2>&1 &
+    VPN_PID=$!
+    echo "📡 OpenVPN-Prozess gestartet (PID: $VPN_PID)"
+
+    echo "⏳ Warte auf VPN-Interface (tun0)..."
+    for i in {1..10}; do
+        sleep 1
+        if ip a | grep -q tun0; then
+            break
+        fi
+    done
+
+    if ip a | grep -q tun0; then
+        echo "⚙️  Setze DNS..."
+        sudo resolvectl dns tun0 10.16.0.1 &>/dev/null
+        echo "🧪 Prüfe Verbindung..."
+        vpn_status
+    else
+        echo "❌ VPN konnte nicht gestartet werden. Prüfe Log unter: /tmp/vpn.log"
+        tail -n 10 /tmp/vpn.log
+    fi
+}
+
+# 📱 VPN-Status
+vpn_status() {
+    echo "🔍 Prüfe VPN-Status..."
+    IFACE="tun0"
+    DNS=$(resolvectl dns 2>/dev/null | grep "$IFACE")
+    IPDATA=$(curl -s https://am.i.mullvad.net/json)
+
+    if ip a | grep -q "$IFACE"; then
+        echo "✅ Interface $IFACE ist aktiv"
+    else
+        echo "❌ Kein VPN-Interface aktiv"
+    fi
+
+    if [[ "$IPDATA" == *'"mullvad_exit_ip":true'* ]]; then
+        if command -v jq >/dev/null; then
+            IP=$(echo "$IPDATA" | jq -r .ip)
+            HOST=$(echo "$IPDATA" | jq -r .mullvad_exit_ip_hostname)
+            CITY=$(echo "$IPDATA" | jq -r .city)
+            COUNTRY=$(echo "$IPDATA" | jq -r .country)
+            echo "🌍 Exit-IP: $IP ($HOST, $CITY, $COUNTRY)"
+        else
+            IP=$(echo "$IPDATA" | grep '"ip"' | cut -d'"' -f4)
+            echo "🌍 Exit-IP: $IP (📦 für mehr Infos: sudo apt install jq)"
+        fi
+    else
+        echo "⚠️  Kein aktiver Mullvad-Tunnel erkannt"
+    fi
+
+    if [ -n "$DNS" ]; then
+        echo "🗽 DNS über $IFACE: $DNS"
+    else
+        echo "⚠️  DNS läuft nicht über $IFACE"
+    fi
+
+    if [[ $EUID -eq 0 ]]; then
+        [[ -f "/etc/systemd/system/vpncli-autostart.service" ]] && echo "🛠 Autostart: aktiviert (systemweit)" || echo "🛠 Autostart: deaktiviert"
+    else
+        [[ -f "$HOME/.config/autostart/vpncli.desktop" ]] && echo "🛠 Autostart: aktiviert (Benutzer)" || echo "🛠 Autostart: deaktiviert"
+    fi
+
+    echo "🔁 Auto-Rotation: $( [[ "$AUTO_ROTATE_INTERVAL" -gt 0 ]] && echo "alle $AUTO_ROTATE_INTERVAL Minuten" || echo "aus")"
+    echo "🎲 Zufallsrotation: $( [[ "$RANDOM_ROTATION" == true ]] && echo "aktiv" || echo "aus")"
+}
+
+vpn_rotate() {
+    SHOW_COUNTRIES=false
+    COUNTRY=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -cs|--country_show) SHOW_COUNTRIES=true; shift ;;
+            -*) COUNTRY="${1:1}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if $SHOW_COUNTRIES; then
+        echo "🌐 Verfügbare Länder in $CONFIG_DIR:"
+        find "$CONFIG_DIR" -type f -name "mullvad_*.conf" |
+            sed 's|.*/||' | awk -F'_' '{print $2}' | sort -u |
+            while read code; do printf "  - %s\n" "$code"; done
+        exit 0
+    fi
+
+    echo "🔄 starte VPN-Rotation..."
+    vpn_off &>/dev/null
+    for i in {1..10}; do sleep 1; ! ip a | grep -q tun0 && break; done
+
+    if [[ -n "$COUNTRY" ]]; then
+        MATCHES=($(find "$CONFIG_DIR" -type f -name "mullvad_${COUNTRY}_*.conf"))
+        if [[ ${#MATCHES[@]} -eq 0 ]]; then
+            echo "❌ Keine passende Konfiguration für '$COUNTRY' gefunden."
+            exit 1
+        fi
+        CONFIG="${MATCHES[$((RANDOM % ${#MATCHES[@]}))]}"
+    elif $RANDOM_ROTATION; then
+        MATCHES=($(find "$CONFIG_DIR" -type f -name "mullvad_*.conf"))
+        CONFIG="${MATCHES[$((RANDOM % ${#MATCHES[@]}))]}"
+    else
+        CONFIG="$DEFAULT_CONFIG"
+    fi
+
+    sudo openvpn --config "$CONFIG" > /tmp/vpn.log 2>&1 &
+    VPN_PID=$!
+    for i in {1..10}; do sleep 1; ip a | grep -q tun0 && break; done
+
+    if ip a | grep -q tun0; then
+        sudo resolvectl dns tun0 10.16.0.1 &>/dev/null
+        IPDATA=$(curl -s https://am.i.mullvad.net/json)
+        if [[ "$IPDATA" == *'"mullvad_exit_ip":true'* ]]; then
+            if command -v jq >/dev/null; then
+                IP=$(echo "$IPDATA" | jq -r .ip)
+                HOST=$(echo "$IPDATA" | jq -r .mullvad_exit_ip_hostname)
+                CITY=$(echo "$IPDATA" | jq -r .city)
+                COUNTRY=$(echo "$IPDATA" | jq -r .country)
+                echo "✅ Wechsel erfolgreich!"
+                echo "🌍 Neuer Exit-IP: $IP ($HOST, $CITY, $COUNTRY)"
+            else
+                IP=$(echo "$IPDATA" | grep '"ip"' | cut -d'"' -f4)
+                echo "✅ Wechsel erfolgreich!"
+                echo "🌍 Neue Exit-IP: $IP"
+            fi
+        else
+            echo "⚠️  Kein aktiver Mullvad-Tunnel erkannt"
+        fi
+    else
+        echo "❌ VPN konnte nicht gestartet werden. Prüfe Log unter: /tmp/vpn.log"
+        tail -n 10 /tmp/vpn.log
+    fi
+}
+
+vpn_uninstall() {
+    echo "⚠️  Du bist dabei, das VPN CLI Toolkit vollständig zu entfernen."
+    read -p "Möchtest du fortfahren? (y/N): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        curl -sL https://raw.githubusercontent.com/RiswanHassen/mullvad-cli-toolkit/main/uninstall-vpn.sh | bash
+    else
+        echo "❌ Abgebrochen."
+    fi
+}
+
+vpn_patch() {
+    echo "📁 Wo liegen deine Mullvad .conf-Dateien?"
+    read -r DIR
+    echo "🔧 Patch-Vorgang für $(find "$DIR" -name '*.conf' | wc -l) .conf-Dateien in $DIR..."
+
+    for f in "$DIR"/*.conf; do
+        echo "🛠️  Bearbeite: $f"
+        sed -i '/^up /d;/^down /d' "$f"
+        sed -i '/^script-security/d' "$f"
+        sed -i '/^redirect-gateway/d' "$f"
+        sed -i '/^tun-mtu/d;/^mssfix/d' "$f"
+
+        echo -e "redirect-gateway def1\nscript-security 2\ntun-mtu 1400\nmssfix 1360" >> "$f"
+        echo "✅ Gepatcht: $(basename "$f")"
+    done
+
+    echo "📂 Gespeichert als Standardpfad in: $CONFIG_FILE"
+    echo "VPNROTATE_CONFIG_DIR=\"$DIR\"" > "$CONFIG_FILE"
+    echo "🎉 VPN-Konfigurationen sind bereit zur Nutzung!"
+}
+
+case "$1" in
+    on) vpn_on ;;
+    off) vpn_off ;;
+    status) vpn_status ;;
+    rotate) shift; vpn_rotate "$@" ;;
+    random) vpn_random_toggle ;;
+    patch) vpn_patch ;;
+    help) print_help; exit 0 ;;
+    autostart) vpn_autostart_toggle ;;
+    autorotate) shift; AUTO_ROTATE_INTERVAL="$1"; start_auto_rotate ;;
+    uninstall) vpn_uninstall ;;
+    *) echo "❌ Unbekannter Befehl: $1"
+       echo "ℹ️  Hilfe anzeigen mit: vpn -h oder vpn --help"
+       exit 1 ;;
+esac
