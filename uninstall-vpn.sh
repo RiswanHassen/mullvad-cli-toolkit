@@ -50,4 +50,11 @@ else
     echo "ℹ️ Kein persistenter VPN-Statusordner gefunden ($VPNDIR)"
 fi
 
+# 7. Statusdatei mit persistenten Einstellungen löschen
+if [[ -f ~/.vpncli.state ]]; then
+    echo "🗑 Entferne ~/.vpncli.state"
+    rm ~/.vpncli.state
+fi
+
+
 echo "✅ VPN CLI Toolkit wurde entfernt."
