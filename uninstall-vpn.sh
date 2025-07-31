@@ -29,16 +29,16 @@ if [[ -f /etc/systemd/system/vpncli.service ]]; then
 fi
 
 # 5. Optional: Projektordner entfernen
-read -p "❓ Möchtest du auch den Projektordner löschen? (y/N): " confirm
-if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    read -p "🗂 Gib den Pfad zum Projektordner ein: " project_path
-    if [[ -d "$project_path" ]]; then
-        echo "🗑 Lösche $project_path..."
-        rm -rf "$project_path"
-    else
-        echo "⚠️ Pfad '$project_path' existiert nicht oder ist kein Verzeichnis."
-    fi
-fi
+#read -p "❓ Möchtest du auch den Projektordner löschen? (y/N): " confirm
+#if [[ "$confirm" =~ ^[Yy]$ ]]; then
+#    read -p "🗂 Gib den Pfad zum Projektordner ein: " project_path
+#    if [[ -d "$project_path" ]]; then
+#        echo "🗑 Lösche $project_path..."
+#        rm -rf "$project_path"
+#    else
+#        echo "⚠️ Pfad '$project_path' existiert nicht oder ist kein Verzeichnis."
+#    fi
+#fi
 
 
 echo "✅ VPN CLI Toolkit wurde entfernt."
